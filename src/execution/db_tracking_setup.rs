@@ -5,11 +5,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 pub fn default_tracking_table_name(flow_name: &str) -> String {
-    let sanitized_name = flow_name
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect::<String>();
-    format!("{}__cocoindex_tracking", sanitized_name)
+    format!(
+        "{}__cocoindex_tracking",
+        utils::db::sanitize_identifier(flow_name)
+    )
 }
 
 pub const CURRENT_TRACKING_TABLE_VERSION: i32 = 1;
@@ -102,7 +101,6 @@ impl TrackingTableSetupStatus {
     }
 }
 
-#[async_trait]
 impl ResourceSetupStatus for TrackingTableSetupStatus {
     fn describe_changes(&self) -> Vec<String> {
         let mut changes: Vec<String> = vec![];
@@ -157,7 +155,13 @@ impl ResourceSetupStatus for TrackingTableSetupStatus {
         }
     }
 
-    async fn apply_change(&self) -> Result<()> {
+    fn as_any(&self) -> &dyn Any {
+        self as &dyn Any
+    }
+}
+
+impl TrackingTableSetupStatus {
+    pub async fn apply_change(&self) -> Result<()> {
         let pool = &get_lib_context()?.builtin_db_pool;
         if let Some(desired) = &self.desired_state {
             for lagacy_name in self.legacy_table_names.iter() {

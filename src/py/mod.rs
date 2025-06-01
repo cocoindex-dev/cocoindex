@@ -1,7 +1,9 @@
+use crate::execution::evaluator::evaluate_transient_flow;
 use crate::prelude::*;
 
 use crate::base::schema::{FieldSchema, ValueType};
 use crate::base::spec::VectorSimilarityMetric;
+use crate::base::spec::{NamedSpec, OutputMode, ReactiveOpSpec, SpecFormatter};
 use crate::execution::query;
 use crate::lib_context::{clear_lib_context, get_auth_registry, init_lib_context};
 use crate::ops::interface::{QueryResult, QueryResults};
@@ -10,6 +12,7 @@ use crate::ops::{interface::ExecutorFactory, py_factory::PyFunctionFactory, regi
 use crate::server::{self, ServerSettings};
 use crate::settings::Settings;
 use crate::setup;
+use pyo3::IntoPyObjectExt;
 use pyo3::{exceptions::PyException, prelude::*};
 use pyo3_async_runtimes::tokio::future_into_py;
 use std::collections::btree_map;
@@ -113,6 +116,24 @@ impl IndexUpdateInfo {
 #[pyclass]
 pub struct Flow(pub Arc<FlowContext>);
 
+/// A single line in the rendered spec, with hierarchical children
+#[pyclass(get_all, set_all)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderedSpecLine {
+    /// The formatted content of the line (e.g., "Import: name=documents, source=LocalFile")
+    pub content: String,
+    /// Child lines in the hierarchy
+    pub children: Vec<RenderedSpecLine>,
+}
+
+/// A rendered specification, grouped by sections
+#[pyclass(get_all, set_all)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderedSpec {
+    /// List of (section_name, lines) pairs
+    pub sections: Vec<(String, Vec<RenderedSpecLine>)>,
+}
+
 #[pyclass]
 pub struct FlowLiveUpdater(pub Arc<tokio::sync::RwLock<execution::FlowLiveUpdater>>);
 
@@ -196,6 +217,75 @@ impl Flow {
         })
     }
 
+    #[pyo3(signature = (output_mode=None))]
+    pub fn get_spec(&self, output_mode: Option<Pythonized<OutputMode>>) -> PyResult<RenderedSpec> {
+        let mode = output_mode.map_or(OutputMode::Concise, |m| m.into_inner());
+        let spec = &self.0.flow.flow_instance;
+        let mut sections: IndexMap<String, Vec<RenderedSpecLine>> = IndexMap::new();
+
+        // Sources
+        sections.insert(
+            "Source".to_string(),
+            spec.import_ops
+                .iter()
+                .map(|op| RenderedSpecLine {
+                    content: format!("Import: name={}, {}", op.name, op.spec.format(mode)),
+                    children: vec![],
+                })
+                .collect(),
+        );
+
+        // Processing
+        fn walk(op: &NamedSpec<ReactiveOpSpec>, mode: OutputMode) -> RenderedSpecLine {
+            let content = format!("{}: {}", op.name, op.spec.format(mode));
+
+            let children = match &op.spec {
+                ReactiveOpSpec::ForEach(fe) => fe
+                    .op_scope
+                    .ops
+                    .iter()
+                    .map(|nested| walk(nested, mode))
+                    .collect(),
+                _ => vec![],
+            };
+
+            RenderedSpecLine { content, children }
+        }
+
+        sections.insert(
+            "Processing".to_string(),
+            spec.reactive_ops.iter().map(|op| walk(op, mode)).collect(),
+        );
+
+        // Targets
+        sections.insert(
+            "Targets".to_string(),
+            spec.export_ops
+                .iter()
+                .map(|op| RenderedSpecLine {
+                    content: format!("Export: name={}, {}", op.name, op.spec.format(mode)),
+                    children: vec![],
+                })
+                .collect(),
+        );
+
+        // Declarations
+        sections.insert(
+            "Declarations".to_string(),
+            spec.declarations
+                .iter()
+                .map(|decl| RenderedSpecLine {
+                    content: format!("Declaration: {}", decl.format(mode)),
+                    children: vec![],
+                })
+                .collect(),
+        );
+
+        Ok(RenderedSpec {
+            sections: sections.into_iter().collect(),
+        })
+    }
+
     pub fn get_schema(&self) -> Vec<(String, String, String)> {
         let schema = &self.0.flow.data_schema;
         let mut result = Vec::new();
@@ -260,6 +350,27 @@ impl TransientFlow {
 
     pub fn __repr__(&self) -> String {
         self.__str__()
+    }
+
+    pub fn evaluate_async<'py>(
+        &self,
+        py: Python<'py>,
+        args: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let flow = self.0.clone();
+        let input_values: Vec<value::Value> = std::iter::zip(
+            self.0.transient_flow_instance.input_fields.iter(),
+            args.into_iter(),
+        )
+        .map(|(input_schema, arg)| value_from_py_object(&input_schema.value_type.typ, &arg))
+        .collect::<PyResult<_>>()?;
+
+        future_into_py(py, async move {
+            let result = evaluate_transient_flow(&flow, &input_values)
+                .await
+                .into_py_result()?;
+            Python::with_gil(|py| value_to_py_object(py, &result)?.into_py_any(py))
+        })
     }
 }
 
@@ -444,6 +555,8 @@ fn cocoindex_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SimpleSemanticsQueryHandler>()?;
     m.add_class::<SetupStatus>()?;
     m.add_class::<PyOpArgSchema>()?;
+    m.add_class::<RenderedSpec>()?;
+    m.add_class::<RenderedSpecLine>()?;
 
     Ok(())
 }

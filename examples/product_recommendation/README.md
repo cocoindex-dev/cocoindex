@@ -1,6 +1,8 @@
-# Build Real-Time Product Recommendation based on LLM Taxonomy Extraction and Knowledge Graph
+# Build Real-Time Recommendation Engine with LLM and Graph Database
 
-We will process a list of products and use LLM to extract the taxonomy and complimentary taxonomy for each product.
+We will build a real-time product recommendation engine with LLM and graph database. In particular, we will use LLM to understand the category (taxonomy) of a product. In addition, we will use LLM to enumerate the complementary products - users are likely to buy together with the current product (pencil and notebook). 
+
+We will use Graph to explore the relationships between products that can be further used for product recommendations or labeling.
 
 Please drop [CocoIndex on Github](https://github.com/cocoindex-io/cocoindex) a star to support us and stay tuned for more updates. Thank you so much 🥥🤗. [![GitHub](https://img.shields.io/github/stars/cocoindex-io/cocoindex?color=5B5BD6)](https://github.com/cocoindex-io/cocoindex)
 
@@ -26,13 +28,13 @@ pip install -e .
 Setup:
 
 ```bash
-python main.py cocoindex setup
+cocoindex setup main.py
 ```
 
 Update index:
 
 ```bash
-python main.py cocoindex update
+cocoindex update main.py
 ```
 
 ### Browse the knowledge graph
@@ -56,7 +58,7 @@ I used CocoInsight (Free beta now) to troubleshoot the index generation and unde
 It just connects to your local CocoIndex server, with Zero pipeline data retention. Run following command to start CocoInsight:
 
 ```bash
-python main.py cocoindex server -ci
+cocoindex server -ci main.py
 ```
 
 And then open the url https://cocoindex.io/cocoinsight. 

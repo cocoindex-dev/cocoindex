@@ -7,10 +7,11 @@ pub trait State<Key>: Debug + Send + Sync {
 }
 
 #[async_trait]
-pub trait Operator {
+pub trait SetupOperator: 'static + Send + Sync {
     type Key: Debug + Hash + Eq + Clone + Send + Sync;
     type State: State<Self::Key>;
     type SetupState: Send + Sync + IntoIterator<Item = Self::State>;
+    type Context: Sync;
 
     fn describe_key(&self, key: &Self::Key) -> String;
 
@@ -18,13 +19,13 @@ pub trait Operator {
 
     fn is_up_to_date(&self, current: &Self::State, desired: &Self::State) -> bool;
 
-    async fn create(&self, state: &Self::State) -> Result<()>;
+    async fn create(&self, state: &Self::State, context: &Self::Context) -> Result<()>;
 
-    async fn delete(&self, key: &Self::Key) -> Result<()>;
+    async fn delete(&self, key: &Self::Key, context: &Self::Context) -> Result<()>;
 
-    async fn update(&self, state: &Self::State) -> Result<()> {
-        self.delete(&state.key()).await?;
-        self.create(state).await
+    async fn update(&self, state: &Self::State, context: &Self::Context) -> Result<()> {
+        self.delete(&state.key(), context).await?;
+        self.create(state, context).await
     }
 }
 
@@ -36,14 +37,14 @@ struct CompositeStateUpsert<S> {
 
 #[derive(Derivative)]
 #[derivative(Debug)]
-pub struct Status<D: Operator> {
+pub struct SetupStatus<D: SetupOperator> {
     #[derivative(Debug = "ignore")]
     desc: D,
     keys_to_delete: IndexSet<D::Key>,
     states_to_upsert: Vec<CompositeStateUpsert<D::State>>,
 }
 
-impl<D: Operator> Status<D> {
+impl<D: SetupOperator> SetupStatus<D> {
     pub fn create(
         desc: D,
         desired: Option<D::SetupState>,
@@ -108,8 +109,7 @@ impl<D: Operator> Status<D> {
     }
 }
 
-#[async_trait]
-impl<D: Operator + Send + Sync> ResourceSetupStatus for Status<D> {
+impl<D: SetupOperator + Send + Sync> ResourceSetupStatus for SetupStatus<D> {
     fn describe_changes(&self) -> Vec<String> {
         let mut result = vec![];
 
@@ -144,42 +144,46 @@ impl<D: Operator + Send + Sync> ResourceSetupStatus for Status<D> {
         }
     }
 
-    async fn apply_change(&self) -> Result<()> {
-        // First delete components that need to be removed
-        for key in &self.keys_to_delete {
-            self.desc.delete(key).await?;
-        }
-
-        // Then upsert components that need to be updated
-        for state in &self.states_to_upsert {
-            if state.already_exists {
-                self.desc.update(&state.state).await?;
-            } else {
-                self.desc.create(&state.state).await?;
-            }
-        }
-
-        Ok(())
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
-#[derive(Debug)]
-struct CombinedStatus<A: ResourceSetupStatus, B: ResourceSetupStatus> {
-    a: A,
-    b: B,
+pub async fn apply_component_changes<D: SetupOperator>(
+    changes: Vec<&SetupStatus<D>>,
+    context: &D::Context,
+) -> Result<()> {
+    // First delete components that need to be removed
+    for change in changes.iter() {
+        for key in &change.keys_to_delete {
+            change.desc.delete(key, context).await?;
+        }
+    }
+
+    // Then upsert components that need to be updated
+    for change in changes.iter() {
+        for state in &change.states_to_upsert {
+            if state.already_exists {
+                change.desc.update(&state.state, context).await?;
+            } else {
+                change.desc.create(&state.state, context).await?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
-#[async_trait]
-impl<A: ResourceSetupStatus, B: ResourceSetupStatus> ResourceSetupStatus for CombinedStatus<A, B> {
+impl<A: ResourceSetupStatus, B: ResourceSetupStatus> ResourceSetupStatus for (A, B) {
     fn describe_changes(&self) -> Vec<String> {
         let mut result = vec![];
-        result.extend(self.a.describe_changes());
-        result.extend(self.b.describe_changes());
+        result.extend(self.0.describe_changes());
+        result.extend(self.1.describe_changes());
         result
     }
 
     fn change_type(&self) -> SetupChangeType {
-        match (self.a.change_type(), self.b.change_type()) {
+        match (self.0.change_type(), self.1.change_type()) {
             (SetupChangeType::Invalid, _) | (_, SetupChangeType::Invalid) => {
                 SetupChangeType::Invalid
             }
@@ -188,15 +192,7 @@ impl<A: ResourceSetupStatus, B: ResourceSetupStatus> ResourceSetupStatus for Com
         }
     }
 
-    async fn apply_change(&self) -> Result<()> {
-        self.a.apply_change().await?;
-        self.b.apply_change().await
+    fn as_any(&self) -> &dyn Any {
+        self
     }
-}
-
-pub fn combine_setup_statuss<A: ResourceSetupStatus, B: ResourceSetupStatus>(
-    a: A,
-    b: B,
-) -> impl ResourceSetupStatus {
-    CombinedStatus { a, b }
 }
